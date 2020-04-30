@@ -191,7 +191,17 @@ def learner_loop(create_env_fn, create_agent_fn, create_optimizer_fn):
   """
   logging.info('Starting learner loop')
   validate_config()
-  settings = utils.init_learner(FLAGS.num_training_tpus)
+  
+  def init_learner(_):
+    tf.device('/cpu').__enter__()
+    any_gpu = tf.config.experimental.list_logical_devices('GPU')
+    device_name = '/device:GPU:0' if any_gpu else '/device:CPU:0'
+    strategy = tf.distribute.MirroredStrategy(cross_device_ops=tf.distribute.HierarchicalCopyAllReduce())
+    enc = lambda x: x
+    dec = lambda x, s=None: x if s is None else tf.nest.pack_sequence_as(s, x)
+    return Settings(strategy, [device_name], strategy, enc, dec)
+  
+  settings = init_learner(FLAGS.num_training_tpus)
   strategy, inference_devices, training_strategy, encode, decode = settings
   env = create_env_fn(0)
   parametric_action_distribution = get_parametric_distribution_for_action_space(
@@ -272,7 +282,8 @@ def learner_loop(create_env_fn, create_agent_fn, create_optimizer_fn):
     loss = training_strategy.experimental_local_results(loss)[0]
 
     def apply_gradients(_):
-      optimizer.apply_gradients(zip(temp_grads, agent.trainable_variables))
+      clip_grads, _ = tf.clip_by_global_norm(temp_grads, 40)
+      optimizer.apply_gradients(zip(clip_grads, agent.trainable_variables))
 
     strategy.experimental_run_v2(apply_gradients, (loss,))
 
